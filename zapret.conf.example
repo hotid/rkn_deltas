@@ -1,0 +1,10 @@
+[DB]
+host = 'localhost'
+user = 'root'
+password = 'password'
+name = 'dbname'
+
+[API]
+url = 'vigruzki2.rkn.gov.ru/services/OperatorRequest2/?wsdl'
+username = 'username'
+password =  'password'
