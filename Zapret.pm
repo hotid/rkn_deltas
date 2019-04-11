@@ -29,7 +29,7 @@ sub new {
 
     our $dbh = dbConnect($::Config->{'DB.name'}, $::Config->{'DB.host'}, $::Config->{'DB.user'}, $::Config->{'DB.password'}),
       my $self = {
-                  service       => SOAP::Lite->service($url),
+                  service       => SOAP::Lite->proxy($url, timeout => 15 )->service($url),
                   dbh           => $dbh,
                   remove_record => $dbh->prepare("delete from records where id=?"),
                   records       => [],
@@ -37,7 +37,6 @@ sub new {
                   domains       => [],
                   ips           => [],
                   ipSubnets     => [],};
-
 
     bless $self, $class;
     return $self;
@@ -66,11 +65,13 @@ sub getDumpDelta {
     my $deltaId = $delta->{'deltaId'};
 
     my @delta_data = $this->_getDumpDelta($deltaId);
-    $this->saveFile($delta_data[1], $deltaId . "_" . $delta_data[0]);
-    my $file        = $::dir . "/" . $deltaId . "_" . $delta_data[0];
-    my $destination = $::dir . "/" . $deltaId . "/";
-    `unzip -o $file -d $destination`;
-    $this->storeDeltaStatus($delta, 1);
+    if (@delta_data && scalar(@delta_data)>0) {
+        $this->saveFile($delta_data[1], $deltaId . "_" . $delta_data[0]);
+        my $file        = $::dir . "/" . $deltaId . "_" . $delta_data[0];
+        my $destination = $::dir . "/" . $deltaId . "/";
+        `unzip -o $file -d $destination`;
+        $this->updateDeltaStatus($delta, 1);
+    }
 }
 
 sub getLastDumpDateEx {
@@ -153,18 +154,29 @@ sub storeDeltaStatus {
     my $delta   = shift;
     my $status  = shift;
     my $isEmpty = 0;
+
+    if ($delta->{'isEmpty'} eq "true") { $isEmpty = 1; }
+
+    if (!$this->getDeltasById($delta->{'deltaId'})) {
+             my $sth = $this->{dbh}->prepare("INSERT into deltas(deltaId, isEmpty, actualDate, updated, status) values(?,?,?,now(),?)");
+             $sth->bind_param(1, $delta->{'deltaId'});
+             $sth->bind_param(2, $isEmpty);
+             $sth->bind_param(3, $delta->{'actualDate'});
+             $sth->bind_param(4, $status);
+             $sth->execute;
+    }
+}
+
+sub updateDeltaStatus {
+    my $this    = shift;
+    my $delta   = shift;
+    my $status  = shift;
+    my $isEmpty = 0;
     if ($delta->{'isEmpty'} eq "true") { $isEmpty = 1; }
     my $sth;
-    if ($status == 0) {
-        $sth = $this->{dbh}->prepare("INSERT ignore into deltas(deltaId, isEmpty, actualDate, updated, status) values(?,?,?,now(),?)");
-    } else {
-        $sth = $this->{dbh}->prepare("INSERT into deltas(deltaId, isEmpty, actualDate, updated, status) values(?,?,?,now(),?) on duplicate key update status=values(status), updated=now()");
-    }
-
-    $sth->bind_param(1, $delta->{'deltaId'});
-    $sth->bind_param(2, $isEmpty);
-    $sth->bind_param(3, $delta->{'actualDate'});
-    $sth->bind_param(4, $status);
+    $sth = $this->{dbh}->prepare("UPDATE deltas set status=?, updated=now() where deltaId=?");
+    $sth->bind_param(1, $status);
+    $sth->bind_param(2, $delta->{'deltaId'});
     $sth->execute or die DBI->errstr;
 }
 
@@ -179,6 +191,19 @@ sub getDeltasByStatus {
         push(@deltas, {'deltaId' => $row->{'deltaId'}, 'isEmpty' => $row->{'isEmpty'}, 'actualDate' => $row->{'actualDate'}});
     }
     return @deltas;
+}
+
+sub getDeltasById {
+    my $this   = shift;
+    my $id = shift;
+    my $sth    = $this->{dbh}->prepare("SELECT * from deltas where deltaId=?");
+    $sth->bind_param(1, $id);
+    $sth->execute or die DBI->errstr;
+    my @deltas;
+    if (my $row = $sth->fetchrow_hashref()) {
+        return 1;
+    }
+    return 0;
 }
 
 sub getParams {
@@ -269,17 +294,21 @@ sub storeIp {
     if ($entryId) {
         if (ref($ips) eq 'ARRAY') {
             foreach my $ip (@$ips) {
-                push @{$this->{ips}}, [ $entryId, $ip ] if (is_ipv4($ip));
+    		if (ref($ip) eq 'HASH') {
+    	            push @{$this->{ips}}, [ $entryId, $ip->{'#text'}, $ip->{'-ts'} ] if (is_ipv4($ip->{'#text'}));
+		} else {
+	            push @{$this->{ips}}, [ $entryId, $ip, 'null' ] if (is_ipv4($ip));
+		}
             }
         } elsif (ref($ips) eq 'HASH') {
-            push @{$this->{ips}}, [ $entryId, $ips->{'#text'} ] if (is_ipv4($ips->{'#text'}));
+            push @{$this->{ips}}, [ $entryId, $ips->{'#text'}, $ips->{'-ts'} ] if (is_ipv4($ips->{'#text'}));
         } else {
-            push @{$this->{ips}}, [ $entryId, $ips ] if (is_ipv4($ips));
+            push @{$this->{ips}}, [ $entryId, $ips, 'null' ] if (is_ipv4($ips));
         }
     }
     if (scalar @{$this->{ips}} > 5000 || (scalar @{$this->{ips}} > 0 && !$entryId)) {
-        my $values = join ", ", ("( ?, inet_aton(?) )") x @{$this->{ips}};
-        my $query  = "INSERT IGNORE into ips(recordId, ip) values $values";
+        my $values = join ", ", ("( ?, inet_aton(?), ? )") x @{$this->{ips}};
+        my $query  = "INSERT IGNORE into ips(recordId, ip, ts) values $values";
         my $sth    = $this->{dbh}->prepare($query);
         $sth->execute(map {@$_} @{$this->{ips}});
         @{$this->{ips}} = ();
@@ -290,26 +319,32 @@ sub storeIpSubnet {
     my $this      = shift;
     my $entryId   = shift;
     my $ipSubnets = shift;
+    my $ts;
     if ($entryId) {
         if (ref($ipSubnets) eq 'ARRAY') {
             foreach my $ipSubnet (@$ipSubnets) {
+		if (ref($ipSubnet) eq 'HASH') {
+			$ts=$ipSubnet->{'-ts'};
+			$ipSubnet=$ipSubnet->{'#text'};
+		}
                 if (my ($ip, $prefix) = ipv4_parse($ipSubnet)) {
-                    push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix ];
+                    push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix, $ts ];
                 }
             }
         } elsif (ref($ipSubnets) eq 'HASH') {
+	    $ts=$ipSubnets->{'-ts'};
             if (my ($ip, $prefix) = ipv4_parse($ipSubnets->{'#text'})) {
-                push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix ];
+                push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix, $ts ];
             }
         } else {
             if (my ($ip, $prefix) = ipv4_parse($ipSubnets)) {
-                push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix ];
+                push @{$this->{ipSubnets}}, [ $entryId, $ip, $prefix, 'null' ];
             }
         }
     }
     if (scalar @{$this->{ipSubnets}} > 5000 || (scalar @{$this->{ipSubnets}} > 0 && !$entryId)) {
-        my $values = join ", ", ("( ?, inet_aton(?), ? )") x @{$this->{ipSubnets}};
-        my $query  = "INSERT IGNORE into ipSubnets(recordId, ip, prefix) values $values";
+        my $values = join ", ", ("( ?, inet_aton(?), ? , ? )") x @{$this->{ipSubnets}};
+        my $query  = "INSERT IGNORE into ipSubnets(recordId, ip, prefix, ts) values $values";
         my $sth    = $this->{dbh}->prepare($query);
         $sth->execute(map {@$_} @{$this->{ipSubnets}});
         @{$this->{ipSubnets}} = ();

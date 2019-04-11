@@ -17,7 +17,6 @@ use Data::Dumper;
 
 binmode(STDOUT, ':utf8');
 binmode(STDERR, ':utf8');
-
 our $dir    = File::Basename::dirname($0);
 our $Config = {};
 my $config_file = $dir . '/zapret.conf';
@@ -34,22 +33,34 @@ our $zapret = new Zapret($Config->{'API.url'}, $Config->{'API.username'}, $Confi
 our %params = $zapret->getParams();
 my $parser = new ZapretParser();
 
+$logger->debug("getDumpDeltaList($params{'updateTime'}))");
+
 my @result      = $zapret->getDumpDeltaList($params{'updateTime'});
 my $return_code = shift @result;
-if ($return_code == -1) {
-    my $result = $zapret->getResult();
-    $parser->parseDump($dir . "dump.xml");
-    exit;
-} elsif ($return_code == 1) {
-    foreach my $delta (@result) {
-        $zapret->storeDeltaStatus($delta, 0);
-    }
-    foreach my $delta ($zapret->getDeltasByStatus(0)) {
-        $zapret->getDumpDelta($delta);
-    }
 
-    foreach my $delta ($zapret->getDeltasByStatus(1)) {
-        $parser->parseDelta($delta);
+if (defined($return_code)) {
+    $logger->debug("getDumpDeltaList got result, return code: $return_code");
+    if ($return_code == -1) {
+        my $result = $zapret->getResult();
+        $parser->parseDump($dir . "dump.xml");
+        exit;
+    } elsif ($return_code == 1) {
+        foreach my $delta (@result) {
+	    $logger->debug("storeDeltaStatus $delta->{'actualDate'}");
+            $zapret->storeDeltaStatus($delta, 0);
+	    $logger->debug("storeDeltaStatus $delta->{'actualDate'} - done");
+        }
+        foreach my $delta ($zapret->getDeltasByStatus(0)) {
+	    $logger->debug("getDumpDelta $delta->{'actualDate'}");
+            $zapret->getDumpDelta($delta);
+	    $logger->debug("getDumpDelta $delta->{'actualDate'} - done");
+        }
+        foreach my $delta ($zapret->getDeltasByStatus(1)) {
+	    $logger->debug("parseDelta $delta->{'actualDate'}");
+            $parser->parseDelta($delta);
+	    $logger->debug("parseDelta $delta->{'actualDate'} - done");
+        }
     }
+} else {
+    $logger->debug("getDumpDeltaList error");
 }
-

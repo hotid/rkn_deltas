@@ -31,11 +31,11 @@ sub parseDump {
 
     my $xml  = read_file($xml_file);
     my $data = xml2hash $xml;
+    $::zapret->{dbh}->begin_work();
     $::zapret->set($data->{'reg:register'}->{'-updateTimeUrgently'}, 'updateTimeUrgently');
     $::zapret->set($data->{'reg:register'}->{'-updateTime'},         'updateTime');
-
     my $ref_type = ref($data->{'reg:register'}->{content});
-    $::zapret->{dbh}->begin_work();
+
     $::zapret->emptyTables();
     if ($ref_type eq 'ARRAY') {
         foreach my $arr (@{$data->{'reg:register'}->{content}}) {
@@ -67,21 +67,25 @@ sub parseDelta {
     $::logger->debug("Parsing delta from file '$xml_file'...");
     my $xml  = read_file($xml_file);
     my $data = xml2hash $xml;
-    if ($data->{'reg:register'}->{delete}) {
+    $::zapret->{dbh}->begin_work();
+
+    if (defined($data->{'reg:register'}->{delete})) {
         my $ref_type = ref($data->{'reg:register'}->{delete});
         if ($ref_type eq 'ARRAY') {
             foreach my $arr (@{$data->{'reg:register'}->{delete}}) {
 		$::zapret->removeEntry($arr->{'-id'});
             }
-
+	} elsif (defined($data->{'reg:register'}->{delete}->{'-id'})) {
+		$::zapret->removeEntry($data->{'reg:register'}->{delete}->{'-id'});
         } else {
             print Dumper $ref_type;
             print Dumper $data;
-            die "shit happened\n";
+            die "shit happened in parseDelta - delete\n";
         }
     }
+    if (defined($data->{'reg:register'}->{content})) {
     my $ref_type = ref($data->{'reg:register'}->{content});
-    $::zapret->{dbh}->begin_work();
+
     if ($ref_type eq 'ARRAY') {
         foreach my $arr (@{$data->{'reg:register'}->{content}}) {
             $this->parseEntry($arr, 0, 1);
@@ -97,13 +101,14 @@ sub parseDelta {
     } else {
         print Dumper $ref_type;
         print Dumper $data;
-        die "shit happened\n";
+        die "shit happened in parseDelta - content\n";
+    }
     }
     $::zapret->storeUrl(0);         #final inserts
     $::zapret->storeDomain(0);      #final inserts
     $::zapret->storeIp(0);          #final inserts
     $::zapret->storeIpSubnet(0);    #final inserts
-    $::zapret->storeDeltaStatus($delta, 2);
+    $::zapret->updateDeltaStatus($delta, 2);
     $::zapret->{dbh}->commit();
     $::zapret->{dbh}->{AutoCommit} = 1;
 }
